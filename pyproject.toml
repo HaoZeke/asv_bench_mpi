@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asv_bench_mpi"
+description = "MPI / mpi4py benchmark plugin for airspeed velocity (asv)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Rohit Goswami", email = "rgoswami@ieee.org" }]
+dependencies = [
+  "asv_runner>=0.2.0",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+mpi = ["mpi4py"]
+test = ["pytest", "mpi4py"]
+
+[project.urls]
+Source = "https://github.com/HaoZeke/asv_bench_mpi"
+Issues = "https://github.com/HaoZeke/asv_bench_mpi/issues"
+
+[tool.setuptools.packages.find]
+include = ["asv_bench_mpi*"]
+
+[tool.setuptools_scm]
+write_to = "asv_bench_mpi/_version.py"
+fallback_version = "0.1.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
