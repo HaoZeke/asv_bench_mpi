@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Live mpiexec smoke — opt-in via ASV_MPI_LIVE=1 (many hosts hang without a full MPI fabric)."""
+"""Live mpiexec smoke — opt-in via ASV_MPI_LIVE=1."""
 
 import json
 import os
@@ -45,26 +45,10 @@ def _run_payload(mode, mod, func, params, reduce="rank0", np=2):
 
 
 def test_track_world_size():
-    import asv_bench_mpi as m
-
-    def _size():
-        from mpi4py import MPI
-
-        return float(MPI.COMM_WORLD.Get_size())
-
-    m._live_probe_size = _size  # type: ignore[attr-defined]
-    val = _run_payload("track", "asv_bench_mpi", "_live_probe_size", [], reduce="rank0", np=2)
+    val = _run_payload("track", "asv_bench_mpi.probes", "world_size", [], reduce="rank0", np=2)
     assert val == 2.0
 
 
 def test_time_barrier_nonneg():
-    import asv_bench_mpi as m
-
-    def _barrier():
-        from mpi4py import MPI
-
-        MPI.COMM_WORLD.Barrier()
-
-    m._live_probe_barrier = _barrier  # type: ignore[attr-defined]
-    t = _run_payload("time", "asv_bench_mpi", "_live_probe_barrier", [], np=2)
+    t = _run_payload("time", "asv_bench_mpi.probes", "barrier", [], np=2)
     assert t >= 0.0
