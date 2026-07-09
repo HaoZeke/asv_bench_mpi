@@ -1,3 +1,4 @@
+# TRANSITIONAL: pure-Python mpiexec+mpi4py path. Prefer native_time_* / native_track_* (C extension, GIL released) and Phase B mpiP for real MPI apps.
 # SPDX-License-Identifier: BSD-3-Clause
 """MPI wall-time benchmarks (mpiexec + mpi4py)."""
 

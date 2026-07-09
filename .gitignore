@@ -7,3 +7,10 @@ build/
 .pytest_cache/
 asv_bench_mpi/_version.py
 .asv/
+*.so
+*.o
+*.mod
+build/
+dist/
+*.egg-info/
+asv_bench_mpi/_native*.so

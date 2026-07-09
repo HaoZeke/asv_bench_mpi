@@ -1,114 +1,82 @@
 # asv_bench_mpi
 
-MPI / **mpi4py** benchmark plugin for [airspeed velocity](https://asv.readthedocs.io/)
-(`asv` + `asv_runner`).
+Native **C/Fortran** launch (and future **mpiP**) plugin for
+[airspeed velocity](https://asv.readthedocs.io/).
 
-Same extension contract as [`asv_bench_memray`](https://github.com/HaoZeke/asv_bench_memray):
+## Design (short)
 
-- package name starts with `asv_bench`
-- types live under `asv_bench_mpi/benchmarks/`
-- each module exports `export_as_benchmark = [...]`
+| Phase | What | Critical path |
+|-------|------|----------------|
+| **A (primary)** | CPython extension `asv_bench_mpi._native` | Compiled `.so` / binary; **GIL released** |
+| **B (scaffold)** | LLNL [mpiP](https://github.com/LLNL/mpiP) | MPI binary + PMPI; Python only parses report |
+| Transitional | `mpi_time_*` / `mpi_track_*` (mpiexec + mpi4py) | Python on every rank — **not recommended** |
 
-## What you get
-
-| Prefix | Type | Measures |
-|--------|------|----------|
-| `mpi_time_*` / `MpiTime*` | `time` (seconds) | Wall time under `mpiexec -n <mpi_np>` (max `MPI.Wtime()` across ranks) |
-| `mpi_track_*` / `MpiTrack*` | `track` | Numeric metric from ranks (`mpi_reduce`: `rank0` / `max` / `min` / `mean`) |
+See [DESIGN.md](DESIGN.md) and [docs/mpip.md](docs/mpip.md).
 
 ## Install
 
-Host (discover plugin) **and** benchmark env (run under MPI):
-
 ```bash
-pip install "asv_bench_mpi[mpi]"   # pulls mpi4py; you still need an MPI library + mpiexec
-# or matrix:
+pip install -e ".[test]"   # builds asv_bench_mpi._native
 ```
+
+Requires a C compiler. Free-threaded CPython: the extension declares
+`Py_MOD_GIL_NOT_USED` when built against headers that define `Py_mod_gil`.
+
+## Primary benchmark types
+
+| Prefix | Measures |
+|--------|----------|
+| `native_time_*` / `NativeTime*` | Wall seconds of `double (*)(long)` in a `.so` |
+| `native_track_*` / `NativeTrack*` | Return value of that symbol |
+
+```python
+from asv_bench_mpi.payload_build import compile_c_kernel
+
+SO = str(compile_c_kernel())
+
+class Kernel:
+    params = [10_000, 1_000_000]
+    param_names = ["n"]
+
+    def native_time_sum(self, n):
+        return (SO, "asv_kernel_sum", n)
+
+    def native_track_sum(self, n):
+        return (SO, "asv_kernel_sum", n)
+```
+
+Or set attributes `so_path` / `symbol` / `n` on the function or class.
+
+## Extension API
+
+```python
+from asv_bench_mpi import _native
+from asv_bench_mpi.payload_build import compile_c_kernel
+
+so = compile_c_kernel()
+k = _native.NativeKernel(str(so), "asv_kernel_sum")
+print(k.call(1000), k.time(1000))
+print(_native.extension_flags())
+print(_native.run_executable(["/bin/true"]))
+```
+
+## Transitional mpi4py path
+
+`mpi_time_*` / `mpi_track_*` still exist for pure-Python MPI microbenchmarks.
+They are **not** the way to profile production C/Fortran MPI codes — use
+Phase A binaries + Phase B mpiP.
+
+## Matrix example
 
 ```json
 {
   "matrix": {
     "req": {
-      "asv_bench_mpi": [""],
-      "mpi4py": [""]
-    }
-  }
-}
-```
-
-For conda/rattler/pixi backends, prefer conda-forge:
-
-```json
-{
-  "environment_type": "rattler",
-  "matrix": {
-    "req": {
-      "mpi4py": [""],
-      "openmpi": [""],
       "asv_bench_mpi": [""]
     }
   }
 }
 ```
 
-Launcher resolution: `ASV_MPIEXEC` / `MPIEXEC` / `MPIRUN` env, else `mpiexec` / `mpirun` on `PATH`.
-
-## Example benchmarks
-
-```python
-# benchmarks/mpi_comm.py
-class Allreduce:
-    """Scaling-style microbench: Allreduce on a small buffer."""
-
-    mpi_np = 4
-    timeout = 60
-    params = [1_000, 100_000]
-    param_names = ["n"]
-
-    def mpi_time_allreduce(self, n):
-        from mpi4py import MPI
-        import numpy as np
-
-        comm = MPI.COMM_WORLD
-        x = np.ones(n, dtype=np.float64)
-        comm.Allreduce(MPI.IN_PLACE, x, op=MPI.SUM)
-
-    def mpi_track_rank_size(self, n):
-        from mpi4py import MPI
-
-        return float(MPI.COMM_WORLD.Get_size())
-
-Allreduce.mpi_track_rank_size.unit = "ranks"
-Allreduce.mpi_track_rank_size.mpi_reduce = "rank0"
-```
-
-```bash
-asv run --bench mpi_time_allreduce
-```
-
-## Attributes
-
-| Attribute | Default | Meaning |
-|-----------|---------|---------|
-| `mpi_np` | `2` | Ranks passed as `mpiexec -n` |
-| `mpiexec` | auto | Launcher path |
-| `mpiexec_args` | `[]` | Extra launcher flags |
-| `mpi_reduce` | `rank0` (track) / `max` (time) | Cross-rank reduction for track metrics |
-| `timeout` | `120` | Seconds for the mpiexec job |
-| `number` | `1` | Outer repeats of full mpiexec for `mpi_time_*` |
-
-## Design notes
-
-- Each sample launches a **fresh MPI job** (like `timeraw_*` uses a fresh process). Setup that must run once per rank goes inside the benchmark body.
-- The callable must live in an **importable module** (normal asv benchmark tree).
-- OpenMPI oversubscribe is enabled by default via MCA env for small CI hosts; override if needed.
-- This is **not** LLNL `mpip` (the profiler). That could be a future optional path.
-
-## Development
-
-```bash
-pip install -e ".[test]"
-pytest -q
-# with MPI:
-mpiexec -n 2 python -c "from mpi4py import MPI; print(MPI.COMM_WORLD.Get_size())"
-```
+For Phase B later: add `openmpi` / `mpich`, build mpiP, and link the app as
+in `docs/mpip.md`.
