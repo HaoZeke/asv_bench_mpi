@@ -11,10 +11,16 @@ from pathlib import Path
 
 
 def find_mpicc() -> str | None:
+    """Locate mpicc; prefer non-Nix so apps match system libmpiP."""
+    from asv_bench_mpi.mpiexec import prefer_non_nix, which_all
+
     for key in ("MPICC", "ASV_MPICC"):
         val = os.environ.get(key)
-        if val and os.path.isfile(val):
+        if val and os.path.isfile(val) and os.access(val, os.X_OK):
             return val
+    chosen = prefer_non_nix(which_all("mpicc"))
+    if chosen:
+        return chosen
     return shutil.which("mpicc")
 
 

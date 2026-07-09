@@ -58,3 +58,20 @@ documented as **transitional** and **non-primary**. Prefer
 
 Python never enters the MPI ranks' hot path; only orchestrates launch and
 parses the text report after finalize.
+
+## Where system calls live (important)
+
+All process launches go through **`asv_bench_mpi._native.run_executable`** in
+`_native.c`, **not** Python `subprocess`:
+
+| Call | Location |
+|------|----------|
+| `fork` | `_native.c` `native_run_executable` |
+| `execve` / `execvp` | child after fork |
+| `waitpid` | parent, GIL released |
+| `chdir` | child if `cwd=` set |
+| `dlopen` / `dlsym` | `NativeKernel` init |
+| kernel call | `NativeKernel_call` / `_time` with `Py_BEGIN_ALLOW_THREADS` |
+
+`mpip_run.run_with_mpip` only builds argv (`mpiexec -n … app`) and env
+(`LD_PRELOAD=libmpiP.so`, `MPIP=…`), then calls `_native.run_executable`.

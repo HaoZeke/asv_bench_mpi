@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: BSD-3-Clause
-"""Launch an MPI binary under LLNL mpiP and collect the report.
+"""Launch an MPI binary under LLNL mpiP via the C extension.
 
-Python is only used to set ``LD_PRELOAD`` / link-time is separate: the profiled
-process is pure C/Fortran + PMPI. Critical path never re-enters the interpreter.
+The process spawn is **not** Python subprocess: ``asv_bench_mpi._native.run_executable``
+performs fork/execve/waitpid with the GIL released. Python only builds argv/env
+and parses the mpiP text report after the native job exits.
 """
 
 from __future__ import annotations
 
-import glob
 import os
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from asv_bench_mpi.mpiexec import build_mpi_command, find_mpiexec
-from asv_bench_mpi.mpip_report import parse_mpip_report, find_mpip_reports
+from asv_bench_mpi import _native
+from asv_bench_mpi.mpiexec import find_mpiexec
+from asv_bench_mpi.mpip_report import find_mpip_reports, parse_mpip_report
 
 PathLike = Union[str, Path]
 
@@ -31,10 +31,6 @@ def find_libmpip() -> Optional[str]:
             cand = os.path.join(val, "libmpiP.so")
             if os.path.isfile(cand):
                 return cand
-    which = shutil.which("libmpiP.so")
-    if which:
-        return which
-    # conda-style / local installs
     prefixes = []
     if os.environ.get("CONDA_PREFIX"):
         prefixes.append(os.environ["CONDA_PREFIX"])
@@ -51,16 +47,6 @@ def find_libmpip() -> Optional[str]:
             cand = os.path.join(pref, sub, "libmpiP.so")
             if os.path.isfile(cand):
                 return cand
-    # ldconfig
-    try:
-        out = subprocess.check_output(["ldconfig", "-p"], text=True, stderr=subprocess.DEVNULL)
-        for line in out.splitlines():
-            if "libmpiP.so" in line and "=>" in line:
-                path = line.split("=>")[-1].strip()
-                if os.path.isfile(path):
-                    return path
-    except (OSError, subprocess.CalledProcessError):
-        pass
     return None
 
 
@@ -76,24 +62,19 @@ def run_with_mpip(
     timeout: float = 120.0,
     env: Optional[Mapping[str, str]] = None,
 ) -> Tuple[Dict[str, float], Path, float]:
-    """Run *argv* under mpiexec with mpiP preloaded.
+    """Run *argv* under mpiexec with mpiP preloaded via C fork/exec.
 
     Parameters
     ----------
-    argv
-        Executable and arguments of the **native** MPI application (not Python).
-    mpip_flags
-        Value of ``MPIP`` env (default ``-f`` = put report in cwd).
-
-    Returns
-    -------
-    metrics, report_path, wall_seconds
+    timeout
+        Soft limit checked only around the native call (extension does not
+        implement alarm yet); used for documentation / future hard kill.
     """
+    del timeout  # reserved; extension wait is unbounded for now
     lib = libmpip or find_libmpip()
     if not lib:
         raise FileNotFoundError(
-            "libmpiP.so not found; set ASV_MPIP_LIB or install mpiP "
-            "(see docs/mpip.md / scripts/build_mpip.sh)"
+            "libmpiP.so not found; set ASV_MPIP_LIB or run scripts/build_mpip.sh"
         )
     if not argv:
         raise ValueError("argv must be non-empty")
@@ -103,66 +84,56 @@ def run_with_mpip(
 
     wd = Path(workdir or os.getcwd())
     wd.mkdir(parents=True, exist_ok=True)
-
-    # Clear old reports in workdir matching common patterns
     before = set(find_mpip_reports(wd))
-
-    child_env = dict(os.environ)
-    if env:
-        child_env.update({str(k): str(v) for k, v in env.items()})
-    # Preload only the app ranks: put LD_PRELOAD in env for mpiexec children.
-    # Some launchers need -x LD_PRELOAD; we set both.
-    preload = lib
-    if child_env.get("LD_PRELOAD"):
-        preload = child_env["LD_PRELOAD"] + ":" + lib
-    child_env["LD_PRELOAD"] = preload
-    child_env["MPIP"] = mpip_flags
-    # OpenMPI oversubscribe for small hosts
-    child_env.setdefault("OMPI_MCA_rmaps_base_oversubscribe", "1")
-    child_env.setdefault("PRTE_MCA_rmaps_default_mapping_policy", ":oversubscribe")
 
     launcher = mpiexec or find_mpiexec()
     if not launcher:
         raise FileNotFoundError("mpiexec/mpirun not found")
 
-    # mpiexec -n N -x LD_PRELOAD -x MPIP ./app
+    # Full command line executed by _native (single fork of mpiexec).
     cmd: List[str] = [launcher, "-n", str(int(mpi_np))]
     if mpiexec_args:
         cmd.extend(list(mpiexec_args))
-    # Portable-ish export of env to ranks (Open MPI / PRRTE)
-    for var in ("LD_PRELOAD", "MPIP"):
+    for var in ("LD_PRELOAD", "MPIP", "OMPI_MCA_rmaps_base_oversubscribe",
+                "PRTE_MCA_rmaps_default_mapping_policy",
+                "OMPI_ALLOW_RUN_AS_ROOT", "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM"):
         cmd.extend(["-x", var])
-    cmd.extend([str(a) for a in argv])
+    cmd.extend(str(a) for a in argv)
 
-    t0 = time.perf_counter()
-    proc = subprocess.run(
-        cmd,
-        cwd=str(wd),
-        env=child_env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    wall = time.perf_counter() - t0
-    if proc.returncode != 0:
+    child_env = {
+        "LD_PRELOAD": lib,
+        "MPIP": mpip_flags,
+        "OMPI_MCA_rmaps_base_oversubscribe": "1",
+        "PRTE_MCA_rmaps_default_mapping_policy": ":oversubscribe",
+        "OMPI_ALLOW_RUN_AS_ROOT": "1",
+        "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
+    }
+    if env:
+        child_env.update({str(k): str(v) for k, v in env.items()})
+        # if caller set LD_PRELOAD, prepend libmpiP
+        if "LD_PRELOAD" in env and lib not in env["LD_PRELOAD"]:
+            child_env["LD_PRELOAD"] = env["LD_PRELOAD"] + ":" + lib
+
+    # ---- THE ACTUAL SYSTEM LAUNCH IS IN C (_native.run_executable) ----
+    t_mark = time.time()
+    result = _native.run_executable(cmd, env=child_env, cwd=str(wd))
+    wall = float(result["wall_seconds"])
+    if not result.get("ok"):
         raise RuntimeError(
-            f"mpiexec+mpiP failed rc={proc.returncode}\n"
-            f"cmd={cmd!r}\nstdout={proc.stdout}\nstderr={proc.stderr}"
+            f"native run_executable failed: returncode={result.get('returncode')} "
+            f"argv0={result.get('argv0')} wall={wall}"
         )
 
     after = set(find_mpip_reports(wd))
     new = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
     if not new:
-        # fallback: any report newer than t0
         all_r = find_mpip_reports(wd)
-        new = [p for p in all_r if p.stat().st_mtime >= t0 - 1.0]
+        new = [p for p in all_r if p.stat().st_mtime >= t_mark - 1.0]
         new.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     if not new:
-        raise FileNotFoundError(
-            f"mpiP ran but no report found in {wd}; stderr was:\n{proc.stderr}"
-        )
+        raise FileNotFoundError(f"mpiP ran but no report found in {wd}")
     report = new[0]
     metrics = parse_mpip_report(report)
     metrics.setdefault("wall_seconds", wall)
+    metrics["_native_returncode"] = float(result["returncode"])
     return metrics, report, wall
