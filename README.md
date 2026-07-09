@@ -60,6 +60,18 @@ print(_native.extension_flags())
 print(_native.run_executable(["/bin/true"]))
 ```
 
+## Real mpiP (native MPI apps)
+
+```bash
+./scripts/build_mpip.sh
+export ASV_MPIP_LIB=$HOME/local/mpip/lib/libmpiP.so
+pytest -q tests/test_mpip_real.py
+```
+
+Benchmark type: ``mpip_track_*`` / ``MpipTrack*`` — returns a metric from a
+**real** mpiP report after ``mpiexec`` + ``LD_PRELOAD=libmpiP.so`` on a
+compiled MPI binary (see ``docs/mpip.md``).
+
 ## Transitional mpi4py path
 
 `mpi_time_*` / `mpi_track_*` still exist for pure-Python MPI microbenchmarks.

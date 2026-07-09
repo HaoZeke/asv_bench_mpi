@@ -47,3 +47,14 @@ presence and a dry-run parse test of a **checked-in sample report**.
 `mpi_time_*` / `mpi_track_*` remain importable for compatibility but are
 documented as **transitional** and **non-primary**. Prefer
 `native_time_*` / `native_track_*` for compiled work.
+
+
+## Real mpiP path (implemented)
+
+1. `scripts/build_mpip.sh` — build LLNL mpiP → `libmpiP.so`
+2. `mpi_app_build.compile_pingpong()` — `mpicc` sample C app
+3. `mpip_run.run_with_mpip(argv)` — `mpiexec -n N -x LD_PRELOAD=libmpiP.so app`
+4. `parse_mpip_report` + `MpipTrackBenchmark` (`mpip_track_*`)
+
+Python never enters the MPI ranks' hot path; only orchestrates launch and
+parses the text report after finalize.

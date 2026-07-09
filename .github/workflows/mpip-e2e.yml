@@ -1,0 +1,36 @@
+name: mpiP real e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  mpip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gfortran \
+            openmpi-bin libopenmpi-dev libunwind-dev binutils-dev \
+            libiberty-dev zlib1g-dev python3-pip python3-venv git
+      - name: Python env
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip setuptools wheel setuptools_scm pytest asv_runner
+          export SETUPTOOLS_SCM_PRETEND_VERSION=0.2.1
+          pip install -e .
+      - name: Build mpiP and run real e2e
+        run: |
+          . .venv/bin/activate
+          export CC=mpicc CXX=mpicxx
+          export OMPI_MCA_rmaps_base_oversubscribe=1
+          export PRTE_MCA_rmaps_default_mapping_policy=:oversubscribe
+          # Open MPI on Ubuntu may need allow root
+          export OMPI_ALLOW_RUN_AS_ROOT=1
+          export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+          bash scripts/run_real_mpip_e2e.sh
